@@ -1,0 +1,1198 @@
+You are working inside the existing platform repository:
+
+```bash
+~/qidd_RK-v3
+```
+
+Your task is to extend the existing **Query Block** so that target- and ligand-aware PDB structure selection becomes dynamic instead of relying on hard-coded PDB structures.
+
+The current BACE1 inhibitor-design workflow is hard coded around:
+
+- `7MYI` for small-molecule inhibitor design.
+- `5MCQ` for peptide design.
+
+These structures are currently used because they have acceptable structural quality, good resolution, and no obvious chain breaks or major structural damage. However, they are not suitable templates for every input compound. The platform must now select experimentally relevant PDB structures dynamically based on:
+
+- User-provided compound SMILES.
+- Compound name or drug name.
+- Target gene/protein name.
+- Optional UniProt accession.
+- Design type: small molecule or peptide.
+- Similarity to co-crystal ligands bound to the target.
+- Protein construct quality.
+- Binding-site compatibility.
+- Structure quality and MD suitability.
+
+Do not remove the existing 7MYI and 5MCQ workflows. Preserve them as validated fallback/reference templates.
+
+***
+
+## 1. First inspect the repository
+
+Before writing code, inspect the complete existing architecture.
+
+Run commands such as:
+
+```bash
+cd ~/qidd_RK-v3
+
+pwd
+find . -maxdepth 2 -type f | sort
+find . -maxdepth 3 -type f | grep -E \
+  'query|block|pdb|bace|dock|md|ligand|protein|target|workflow|agent|api'
+```
+
+Identify:
+
+- Frontend entry points.
+- Backend entry points.
+- Query Block implementation.
+- Existing API routes.
+- Existing service or provider layers.
+- State-management approach.
+- Existing PDB or UniProt integrations.
+- Existing ligand/SMILES normalization code.
+- Existing BACE1-specific logic.
+- Existing docking and MD workflow invocation code.
+- Existing schemas or types.
+- Existing test framework.
+- Existing logging and error-handling conventions.
+
+Read relevant files before making changes. Do not create a parallel architecture if an existing service, provider, utility, schema, or API abstraction can be extended.
+
+Prepare an internal implementation plan based on the actual repository structure. Do not assume that the project uses a specific framework, directory layout, database, or package manager.
+
+***
+
+## 2. Preserve current behavior
+
+The extension must be backward-compatible.
+
+Existing behavior must continue to work when:
+
+- The user provides only a known target.
+- The user provides no valid SMILES.
+- The PDB/UniProt services are unavailable.
+- Dynamic structure selection fails.
+- The selected target is BACE1.
+- The user explicitly selects an existing fixed template.
+- The input is a peptide and the peptide workflow already expects 5MCQ.
+- Cached results are available.
+
+The platform must retain:
+
+```text
+7MYI → validated small-molecule BACE1 fallback
+5MCQ → validated peptide BACE1 fallback
+```
+
+The fallback must be explicit in the output. Do not silently report a fallback PDB as though it were dynamically selected.
+
+Example fallback metadata:
+
+```json
+{
+  "selectionMode": "validated_fallback",
+  "fallbackReason": "No target-associated ligand passed the configured similarity and quality thresholds",
+  "pdbId": "7MYI",
+  "confidenceTier": "fallback"
+}
+```
+
+***
+
+## 3. Extend the Query Block input model
+
+Locate the existing Query Block input schema and extend it without breaking existing fields.
+
+Support the following input concepts:
+
+```json
+{
+  "query": {
+    "compoundName": "optional compound name",
+    "drugName": "optional drug name",
+    "smiles": "optional SMILES",
+    "inchi": "optional InChI",
+    "inchikey": "optional InChIKey",
+    "targetName": "BACE1",
+    "geneSymbol": "BACE1",
+    "uniprotAccession": "optional UniProt accession",
+    "designType": "small_molecule",
+    "organism": "Homo sapiens",
+    "preferredPdbId": null,
+    "allowFallback": true,
+    "maxStructureCandidates": 25,
+    "maxLigandCandidates": 100
+  }
+}
+```
+
+The implementation must support at least:
+
+```text
+designType = small_molecule
+designType = peptide
+designType = auto
+```
+
+If the current project uses TypeScript, update the relevant interfaces/types. If it uses JSON schemas, update the schemas and validation. If it uses Python models, update the relevant Pydantic/dataclass models.
+
+Do not duplicate schemas in multiple locations unless the project already follows that convention.
+
+***
+
+## 4. Normalize and validate the query molecule
+
+Create or extend the existing chemical-normalization layer.
+
+The normalization pipeline should:
+
+1. Prefer user-provided SMILES when valid.
+2. Resolve a compound name or drug name if SMILES is absent.
+3. Validate the resulting structure.
+4. Standardize aromaticity.
+5. Preserve stereochemistry.
+6. Generate canonical SMILES.
+7. Generate InChI and InChIKey where possible.
+8. Generate a standardized representation for similarity searching.
+9. Detect whether the molecule is likely:
+   - Small molecule.
+   - Peptide.
+   - Peptidomimetic.
+   - Covalent inhibitor.
+   - Salt or multi-component compound.
+10. Generate protonation/tautomer variants only where the existing platform supports this safely.
+
+Do not overwrite the user’s original input. Store both:
+
+```json
+{
+  "inputSmiles": "...",
+  "canonicalSmiles": "...",
+  "standardizationWarnings": []
+}
+```
+
+If RDKit is already present, use the project’s existing RDKit integration. Do not introduce a second chemistry toolkit unnecessarily.
+
+Handle:
+
+- Invalid SMILES.
+- Unsupported atoms.
+- Mixtures.
+- Salts.
+- Dot-disconnected SMILES.
+- Missing stereochemistry.
+- Macrocycles.
+- Long peptide-like sequences.
+- Tautomers.
+- Protonation ambiguity.
+
+Warnings should be surfaced to the Query Block UI and included in machine-readable output.
+
+***
+
+## 5. Resolve the biological target
+
+Implement target resolution using the existing target-resolution architecture if one already exists.
+
+The target-resolution layer should accept:
+
+- Gene symbol.
+- Protein name.
+- Compound-associated target name.
+- UniProt accession.
+- Existing target object from upstream blocks.
+
+The preferred resolution order is:
+
+```text
+Explicit UniProt accession
+> validated gene symbol
+> exact protein-name match
+> alias/name search
+> compound-associated target inference
+```
+
+For BACE1, the system should resolve the correct UniProt record and distinguish the intended species. Prefer a reviewed UniProtKB/Swiss-Prot entry when possible.
+
+The target-resolution result should contain:
+
+```json
+{
+  "target": {
+    "geneSymbol": "BACE1",
+    "proteinName": "...",
+    "uniprotAccession": "...",
+    "organism": "Homo sapiens",
+    "reviewed": true,
+    "aliases": [],
+    "sequenceLength": null
+  },
+  "resolutionStatus": "resolved",
+  "warnings": []
+}
+```
+
+Do not use free-text gene-name matching as the only mechanism for identifying PDB structures.
+
+***
+
+## 6. Retrieve target-associated PDB structures
+
+Add a provider/service layer for retrieving target-associated PDB structures.
+
+Use official RCSB PDB and UniProt programmatic interfaces where possible. The platform should support:
+
+- RCSB Search API.
+- RCSB Data API.
+- RCSB chemical search capabilities.
+- UniProt REST API.
+- Existing local caches or databases if present.
+
+RCSB supports programmatic searches by annotations, chemical structure, sequence, and other structure metadata. Target-associated structures can be found through UniProt reference-sequence mappings in PDB polymer entities. [rcsb](https://www.rcsb.org/docs/general-help/web-services-overview)
+
+Do not scrape HTML pages if a stable API is available.
+
+The provider must retrieve, where available:
+
+### Entry-level metadata
+
+- PDB ID.
+- Structure title.
+- Experimental method.
+- Resolution.
+- R-work and R-free if available.
+- Deposition date.
+- Release date.
+- Authors or citation metadata.
+- Assembly information.
+
+### Polymer/entity metadata
+
+- Polymer entity ID.
+- Chain IDs.
+- UniProt accession.
+- Sequence coverage.
+- Sequence identity.
+- Construct description.
+- Mutations.
+- Missing residues.
+- Domain information.
+
+### Ligand metadata
+
+- Chemical component ID.
+- Ligand name.
+- Canonical SMILES.
+- InChI/InChIKey if available.
+- Molecular formula.
+- Molecular weight.
+- Bound chain and residue identifiers.
+- Occupancy.
+- Number of copies.
+- Covalent/noncovalent status where available.
+
+### Binding-site metadata
+
+- Ligand-contact residues.
+- Contact distances.
+- Hydrogen bonds if available.
+- Nearby waters.
+- Catalytic residue contacts.
+- Binding-site completeness.
+
+Use pagination, retry logic, rate limiting, and caching.
+
+***
+
+## 7. Add a local target-structure and ligand index
+
+If the platform already has a database or cache layer, extend it. Otherwise, implement a lightweight cache using the project’s existing persistence approach.
+
+The index should store normalized records similar to:
+
+```json
+{
+  "pdbId": "XXXX",
+  "entryId": "XXXX",
+  "polymerEntityId": "XXXX_1",
+  "chainIds": ["A"],
+  "uniprotAccessions": ["..."],
+  "targetGeneSymbols": ["BACE1"],
+  "experimentalMethod": "X-RAY DIFFRACTION",
+  "resolutionAngstrom": 1.8,
+  "releaseDate": "YYYY-MM-DD",
+  "sequenceCoverage": 0.94,
+  "sequenceIdentity": 1.0,
+  "constructMutations": [],
+  "missingResidues": [],
+  "ligands": [],
+  "bindingSiteResidues": [],
+  "qualityFlags": [],
+  "retrievedAt": "..."
+}
+```
+
+Each ligand record should contain:
+
+```json
+{
+  "ccdId": "ABC",
+  "name": "...",
+  "smiles": "...",
+  "inchi": "...",
+  "inchikey": "...",
+  "molecularWeight": 0.0,
+  "isCovalent": false,
+  "isSolvent": false,
+  "isIon": false,
+  "isBuffer": false,
+  "isCrystallizationArtifact": false,
+  "boundChains": ["A"],
+  "residueNumbers": [],
+  "occupancy": 1.0,
+  "contactResidues": []
+}
+```
+
+Do not treat every non-protein chemical component as an inhibitor. Exclude or flag:
+
+- Water.
+- Buffer molecules.
+- Cryoprotectants.
+- Common salts.
+- Detergents.
+- Ions.
+- Crystallization additives.
+- Cofactors unless explicitly relevant.
+- Modified amino acids unless the design type requires them.
+
+Maintain an allowlist and denylist, but make it configurable.
+
+***
+
+## 8. Implement small-molecule ligand similarity search
+
+For a small-molecule query, implement a staged similarity workflow.
+
+### Search stages
+
+1. Exact InChIKey or exact standardized structure.
+2. Stereospecific graph similarity.
+3. Non-stereospecific graph similarity.
+4. Substructure search.
+5. Fingerprint similarity.
+6. Scaffold similarity.
+7. MCS coverage.
+8. Pharmacophore similarity if supported.
+9. Interaction-pattern compatibility.
+
+The system should use RCSB chemical search for retrieval where practical, then perform final ranking locally with the project’s cheminformatics toolkit.
+
+Do not use one similarity value as the entire decision.
+
+At minimum, calculate:
+
+```json
+{
+  "ecfpTanimoto": 0.0,
+  "mcsCoverageQuery": 0.0,
+  "mcsCoverageTemplate": 0.0,
+  "scaffoldSimilarity": 0.0,
+  "stereochemistryMatch": false,
+  "substructureMatch": false,
+  "pharmacophoreSimilarity": null
+}
+```
+
+Suggested initial ligand score:
+
+\[
+S_{\text{ligand}} =
+0.30T_{\text{ECFP}}
++0.25C_{\text{MCS}}
++0.20S_{\text{scaffold}}
++0.15S_{\text{pharmacophore}}
++0.10S_{\text{stereo}}
+\]
+
+If a component is unavailable, renormalize the weights rather than assigning an arbitrary zero.
+
+Expose all component scores for debugging and scientific auditability.
+
+***
+
+## 9. Implement peptide-specific similarity search
+
+Do not use ordinary small-molecule fingerprints as the primary method for peptide design.
+
+For peptide or peptide-like input, implement or extend a peptide-specific selector using:
+
+- Peptide sequence extraction where possible.
+- Residue-level alignment.
+- Length similarity.
+- Sequence identity.
+- Similarity at key substrate-recognition positions.
+- Backbone interaction similarity.
+- Contact-map similarity.
+- Binding-site coverage.
+- Peptide conformation or secondary-structure compatibility.
+
+Store peptide-specific scores:
+
+```json
+{
+  "sequenceIdentity": 0.0,
+  "alignmentCoverage": 0.0,
+  "lengthSimilarity": 0.0,
+  "contactMapSimilarity": 0.0,
+  "backboneInteractionSimilarity": 0.0,
+  "keyPositionCompatibility": 0.0
+}
+```
+
+For peptide design, retain `5MCQ` as the validated fallback unless the repository already specifies a different fallback.
+
+Do not classify a peptidomimetic automatically as a true peptide solely because it contains amide bonds. Use explicit classification logic and allow expert override.
+
+***
+
+## 10. Implement binding-site and interaction compatibility
+
+A structurally similar ligand is not necessarily a suitable docking template. Add a binding-mode compatibility layer.
+
+For every candidate ligand/PDB pair, calculate or retrieve:
+
+- Contact residues.
+- Contact residue overlap with known target pocket residues.
+- Catalytic residue contacts.
+- Hydrogen-bond donor/acceptor pattern.
+- Hydrophobic contact pattern.
+- Salt-bridge pattern.
+- Aromatic stacking or cation–π interactions.
+- Water-mediated contact information where available.
+- Ligand exit-vector compatibility if computable.
+
+For BACE1, make the active-site catalytic residues and substrate-recognition pocket configurable in target metadata. Do not hard-code them inside generic selection logic.
+
+The score should reward conservation of important interactions:
+
+\[
+S_{\text{interaction}} =
+w_c S_{\text{catalytic}}
++w_p S_{\text{pocket}}
++w_h S_{\text{hydrogenBond}}
++w_s S_{\text{saltBridge}}
++w_w S_{\text{waterNetwork}}
+\]
+
+The implementation should tolerate incomplete interaction metadata and report which terms were unavailable.
+
+***
+
+## 11. Implement protein compatibility checks
+
+Before a structure can be selected, evaluate the protein construct.
+
+Check:
+
+- UniProt mapping.
+- Target sequence identity.
+- Sequence coverage.
+- Catalytic-domain coverage.
+- Pocket-residue coverage.
+- Active-site mutations.
+- Mutations within the ligand-contact region.
+- Missing residues near the binding site.
+- Chain breaks.
+- Alternate locations.
+- Unresolved side chains.
+- Nonstandard residues.
+- Bound cofactors or ions.
+- Domain truncations.
+- Species differences.
+- Engineered mutations.
+
+Create configurable hard filters and soft penalties.
+
+Example:
+
+```json
+{
+  "hardFilters": {
+    "requireUniProtMapping": true,
+    "requireBoundLigand": true,
+    "requirePocketCoverage": true,
+    "maxMissingPocketResidues": 0,
+    "maxActiveSiteMutations": 0
+  },
+  "softPenalties": {
+    "remoteMutation": 0.05,
+    "lowSequenceCoverage": 0.15,
+    "alternateLocation": 0.05,
+    "missingNoncriticalLoop": 0.05
+  }
+}
+```
+
+Do not reject a structure solely because it contains a remote mutation or a non-pocket unresolved loop.
+
+***
+
+## 12. Implement structure-quality scoring
+
+Calculate a structure-quality score using available metadata.
+
+Suggested components:
+
+| Component | Suggested contribution |
+|---|---:|
+| Resolution | 20% |
+| Binding-site completeness | 20% |
+| Sequence coverage | 15% |
+| Active-site integrity | 20% |
+| Ligand occupancy/quality | 10% |
+| Experimental method and refinement quality | 10% |
+| MD preparation suitability | 5% |
+
+Use configurable thresholds. Do not encode arbitrary thresholds without documenting them.
+
+The quality score should penalize:
+
+- Poor resolution.
+- Missing active-site atoms.
+- Severe chain breaks.
+- Low ligand occupancy.
+- Unresolved pocket residues.
+- Major alternate conformations.
+- Unusual geometry.
+- Incompatible mutations.
+- Incomplete catalytic residues.
+
+The system should distinguish:
+
+```text
+qualityScore
+qualityTier
+qualityFlags
+qualityWarnings
+```
+
+Example:
+
+```json
+{
+  "qualityScore": 0.88,
+  "qualityTier": "high",
+  "qualityFlags": [],
+  "qualityWarnings": [
+    "One remote unresolved loop"
+  ]
+}
+```
+
+***
+
+## 13. Implement docking-template and MD-template selection separately
+
+The best template for docking may not be the best template for MD.
+
+Implement separate selection outputs:
+
+```json
+{
+  "dockingTemplate": {
+    "pdbId": "XXXX",
+    "ligandId": "ABC",
+    "score": 0.87,
+    "confidenceTier": "high"
+  },
+  "mdTemplate": {
+    "pdbId": "YYYY",
+    "ligandId": "DEF",
+    "score": 0.83,
+    "confidenceTier": "high"
+  }
+}
+```
+
+### Docking selection should prioritize
+
+- Ligand similarity.
+- Binding-mode similarity.
+- Pocket openness.
+- Compatible ligand orientation.
+- Complete docking site.
+
+### MD selection should prioritize
+
+- Protein coordinate quality.
+- Complete active site.
+- Stable catalytic geometry.
+- Appropriate waters and ions.
+- Minimal unresolved pocket structure.
+- Easy and reliable parameterization.
+
+If the same PDB is suitable for both, use it. If not, report why different structures were selected.
+
+***
+
+## 14. Add ensemble support
+
+Do not return only one candidate internally.
+
+Return:
+
+- Primary candidate.
+- Two to five alternate candidates where available.
+- Candidate ranking.
+- Candidate exclusion reasons.
+- Structure clusters or conformational groups if implemented.
+
+Example:
+
+```json
+{
+  "primaryCandidate": {
+    "pdbId": "XXXX",
+    "ligandId": "ABC"
+  },
+  "alternateCandidates": [
+    {
+      "pdbId": "YYYY",
+      "ligandId": "DEF",
+      "reason": "Alternative pocket conformation"
+    }
+  ],
+  "ensembleAvailable": true
+}
+```
+
+The downstream docking workflow should be able to:
+
+- Dock against the primary structure only.
+- Dock against the full selected ensemble.
+- Run consensus scoring.
+- Compare poses across structures.
+
+Make this behavior configurable.
+
+***
+
+## 15. Add fallback logic
+
+Implement the following fallback hierarchy:
+
+```text
+1. Exact or near-exact target-bound ligand match.
+2. Same target and related ligand class.
+3. Same target with a compatible active-site ligand.
+4. Same target apo or unrelated-ligand structure.
+5. Validated project fallback.
+6. Homologous or predicted structure, only if explicitly enabled.
+```
+
+For BACE1:
+
+```text
+Small molecule fallback: 7MYI
+Peptide fallback: 5MCQ
+```
+
+Each fallback must include:
+
+- Reason.
+- Triggering threshold.
+- Warnings.
+- Confidence tier.
+- Whether the user needs to approve it.
+
+Never hide fallback selection from the user.
+
+***
+
+## 16. Define the final Query Block output
+
+Extend the Query Block output with a structured, stable object.
+
+Use the project’s existing output conventions, but include fields equivalent to:
+
+```json
+{
+  "queryBlockVersion": "x.y.z",
+  "status": "success",
+  "input": {
+    "compoundName": null,
+    "drugName": null,
+    "inputSmiles": "...",
+    "canonicalSmiles": "...",
+    "targetName": "BACE1",
+    "geneSymbol": "BACE1",
+    "designType": "small_molecule"
+  },
+  "target": {
+    "geneSymbol": "BACE1",
+    "uniprotAccession": "...",
+    "organism": "Homo sapiens",
+    "resolutionStatus": "resolved"
+  },
+  "structureSelection": {
+    "selectionMode": "dynamic_similarity",
+    "primaryPdbId": "XXXX",
+    "primaryLigandId": "ABC",
+    "dockingPdbId": "XXXX",
+    "mdPdbId": "YYYY",
+    "confidenceTier": "high",
+    "overallScore": 0.87,
+    "fallbackUsed": false,
+    "fallbackReason": null
+  },
+  "similarity": {
+    "ecfpTanimoto": 0.0,
+    "mcsCoverage": 0.0,
+    "scaffoldSimilarity": 0.0,
+    "interactionSimilarity": 0.0
+  },
+  "structureQuality": {
+    "resolutionAngstrom": 0.0,
+    "sequenceCoverage": 0.0,
+    "pocketCoverage": 0.0,
+    "qualityScore": 0.0,
+    "qualityTier": "high",
+    "flags": []
+  },
+  "candidates": [],
+  "warnings": [],
+  "errors": [],
+  "provenance": {
+    "providers": [],
+    "retrievedAt": "...",
+    "cacheUsed": false,
+    "algorithmVersion": "..."
+  }
+}
+```
+
+The output must be serializable and suitable for:
+
+- Frontend display.
+- Downstream docking.
+- Downstream MD preparation.
+- Agent orchestration.
+- Reproducibility.
+- Audit logs.
+- Future model training.
+
+***
+
+## 17. Add Query Block UI support
+
+Inspect the existing Query Block UI and extend it consistently.
+
+Add fields or controls for:
+
+- Compound name.
+- Drug name.
+- SMILES.
+- Target/gene.
+- UniProt accession.
+- Design type.
+- Dynamic template selection toggle.
+- Preferred PDB override.
+- Allow fallback.
+- Number of alternate structures.
+- Similarity threshold.
+- Quality threshold.
+- Ensemble docking toggle.
+
+Display:
+
+- Resolved target.
+- Selected PDB.
+- Selected co-crystal ligand.
+- Similarity score.
+- Binding-mode score.
+- Structure-quality score.
+- Docking template.
+- MD template.
+- Confidence tier.
+- Fallback warnings.
+- Candidate alternatives.
+- Reasons for exclusion.
+
+Use clear labels such as:
+
+```text
+Dynamically selected structure
+Validated fallback structure
+User-selected structure
+Low-confidence structure
+```
+
+Do not overload the UI with raw API data. Provide an expert-details panel or expandable diagnostic section.
+
+***
+
+## 18. Add configuration
+
+Place configurable values in the project’s existing configuration system.
+
+Configuration should include:
+
+```json
+{
+  "structureSelection": {
+    "enabled": true,
+    "defaultDesignType": "auto",
+    "minLigandSimilarity": 0.35,
+    "minInteractionSimilarity": 0.40,
+    "minQualityScore": 0.60,
+    "maxCandidates": 25,
+    "useEnsemble": true,
+    "maxAlternateCandidates": 5,
+    "allowApoFallback": false,
+    "allowHomologFallback": false,
+    "allowPredictedStructureFallback": false
+  },
+  "validatedFallbacks": {
+    "BACE1": {
+      "small_molecule": "7MYI",
+      "peptide": "5MCQ"
+    }
+  }
+}
+```
+
+Do not hard-code these values across multiple source files.
+
+***
+
+## 19. Add caching and reproducibility
+
+The external APIs may be slow or rate-limited. Implement caching using the project’s existing cache mechanism.
+
+Cache:
+
+- Target resolution.
+- UniProt metadata.
+- PDB search results.
+- PDB entry metadata.
+- Ligand metadata.
+- Similarity calculations.
+- Structure-quality calculations.
+
+Each selection result must record:
+
+- Query hash.
+- Target identifier.
+- API/provider versions where available.
+- Retrieval timestamp.
+- Algorithm version.
+- Configuration version.
+- Candidate set hash.
+- Selected candidate.
+- Fallback reason.
+
+The same input and configuration should produce the same result whenever the external data has not changed.
+
+***
+
+## 20. Error handling
+
+Handle errors gracefully and distinguish:
+
+```text
+Input validation error
+Target-resolution error
+Chemical-normalization error
+External API error
+No structures found
+No suitable ligands found
+Similarity below threshold
+Quality below threshold
+PDB download error
+Cache error
+Downstream workflow error
+```
+
+Do not return a generic “PDB selection failed” message.
+
+Example:
+
+```json
+{
+  "status": "fallback",
+  "errors": [],
+  "warnings": [
+    {
+      "code": "NO_SIMILAR_COCRYSTAL_LIGAND",
+      "message": "No target-bound ligand exceeded the configured similarity threshold."
+    }
+  ]
+}
+```
+
+Use retry logic only for transient errors. Do not retry invalid requests indefinitely.
+
+***
+
+## 21. Testing requirements
+
+Add unit, integration, and regression tests.
+
+### Unit tests
+
+Cover:
+
+- SMILES normalization.
+- Compound-name resolution.
+- Target resolution.
+- PDB metadata parsing.
+- Ligand filtering.
+- Exact matching.
+- Fingerprint similarity.
+- MCS scoring.
+- Peptide alignment.
+- Interaction scoring.
+- Protein-quality scoring.
+- Fallback selection.
+- Confidence-tier calculation.
+- Configuration overrides.
+
+### Integration tests
+
+Mock external APIs and test:
+
+- BACE1 small-molecule query.
+- BACE1 peptide query.
+- Query with valid SMILES and compound name.
+- Query with compound name but no SMILES.
+- Query with invalid SMILES.
+- Query with explicit UniProt accession.
+- Query with preferred PDB override.
+- No similar ligand.
+- External API timeout.
+- Cached response.
+- Multiple candidate structures.
+- Separate docking and MD templates.
+
+### Regression tests
+
+Verify that:
+
+- Existing 7MYI workflow still runs.
+- Existing 5MCQ workflow still runs.
+- Existing docking and MD blocks receive compatible inputs.
+- Existing frontend workflows do not break.
+- Existing serialized workflow definitions remain loadable.
+- Existing APIs remain backward-compatible.
+
+Use deterministic mock data. Do not make CI tests depend on live RCSB or UniProt availability.
+
+***
+
+## 22. Security and operational requirements
+
+Do not execute user-supplied shell commands or arbitrary code.
+
+Validate:
+
+- URLs.
+- PDB IDs.
+- UniProt accessions.
+- SMILES length.
+- Compound-name length.
+- Query payload size.
+
+Use timeouts for external network calls.
+
+Avoid writing uncontrolled files into the repository. Use the existing data/cache directories.
+
+Do not log sensitive user data unnecessarily. If the platform has multi-user support, ensure query and cached-result isolation.
+
+***
+
+## 23. Documentation requirements
+
+Update the repository documentation with:
+
+- New Query Block inputs.
+- New output schema.
+- Structure-selection algorithm.
+- Similarity metrics.
+- Quality metrics.
+- Fallback behavior.
+- BACE1 defaults.
+- API dependencies.
+- Configuration options.
+- Cache behavior.
+- Test commands.
+- Example outputs.
+- Known limitations.
+
+Include a short architecture diagram or Mermaid diagram if the repository already uses Mermaid.
+
+Document that ligand similarity is a retrieval signal, not the sole selection criterion.
+
+***
+
+## 24. Implementation constraints
+
+Follow these constraints:
+
+1. Inspect and reuse the current architecture.
+2. Do not rewrite unrelated modules.
+3. Do not remove 7MYI or 5MCQ.
+4. Do not silently change existing downstream schemas.
+5. Use feature flags if necessary.
+6. Keep external providers abstracted behind interfaces.
+7. Keep scoring configurable.
+8. Make all selections explainable.
+9. Preserve provenance.
+10. Prefer deterministic behavior.
+11. Use typed models where the project supports them.
+12. Add tests before or alongside implementation.
+13. Do not assume that every PDB ligand is an inhibitor.
+14. Do not select structures solely by newest release date.
+15. Do not select structures solely by resolution.
+16. Do not use small-molecule fingerprints as the primary peptide-selection method.
+17. Do not silently fall back when confidence is low.
+18. Do not claim a structure is suitable for MD without checking pocket completeness and parameterization requirements.
+
+***
+
+## 25. Required implementation sequence
+
+Implement in this order:
+
+### Phase 1: Repository analysis
+
+- Inspect the repository.
+- Identify Query Block and related workflow components.
+- Document the existing data flow.
+
+### Phase 2: Data models and configuration
+
+- Extend input/output models.
+- Add configuration.
+- Add feature flags.
+
+### Phase 3: Provider abstractions
+
+- Add or extend RCSB provider.
+- Add or extend UniProt provider.
+- Add caching and retry logic.
+
+### Phase 4: Normalization and target resolution
+
+- Normalize compound input.
+- Resolve the target.
+- Add validation and warnings.
+
+### Phase 5: Candidate indexing and filtering
+
+- Retrieve target-associated structures.
+- Parse ligand and protein metadata.
+- Filter unsuitable candidates.
+
+### Phase 6: Scoring and ranking
+
+- Implement small-molecule scoring.
+- Implement peptide scoring.
+- Implement interaction compatibility.
+- Implement quality scoring.
+- Implement docking and MD template selection.
+
+### Phase 7: Query Block integration
+
+- Integrate dynamic selection into the existing Query Block.
+- Preserve existing output compatibility.
+- Connect selected structures to downstream docking and MD blocks.
+
+### Phase 8: UI and diagnostics
+
+- Add controls and result display.
+- Add candidate and fallback diagnostics.
+
+### Phase 9: Testing
+
+- Add unit tests.
+- Add mocked integration tests.
+- Add regression tests.
+
+### Phase 10: Documentation and validation
+
+- Update documentation.
+- Run linting, type checks, tests, and build.
+- Perform a BACE1 end-to-end dry run.
+- Summarize changed files and remaining limitations.
+
+***
+
+## 26. Commands to run before completion
+
+Use the repository’s actual package manager and scripts, but run equivalents of:
+
+```bash
+npm test
+npm run lint
+npm run typecheck
+npm run build
+```
+
+or, if the project uses Python:
+
+```bash
+pytest
+ruff check .
+mypy .
+```
+
+Also run the relevant application-specific validation commands.
+
+Do not report success unless the commands actually pass. If a command fails because of a pre-existing issue, clearly separate:
+
+```text
+New failure introduced by this change
+```
+
+from:
+
+```text
+Pre-existing failure
+```
+
+***
+
+## 27. Final response expected from you
+
+When implementation is complete, provide:
+
+1. A concise summary of the architecture changes.
+2. The files created or modified.
+3. The new Query Block input/output behavior.
+4. The structure-selection algorithm.
+5. How 7MYI and 5MCQ remain supported.
+6. Configuration options added.
+7. Test results.
+8. Build and lint results.
+9. Any known limitations.
+10. Example input and output for:
+   - BACE1 small-molecule design.
+   - BACE1 peptide design.
+   - No-similarity fallback.
+11. Recommended next steps.
+
+Do not merely describe code that was not implemented. Clearly distinguish completed work from proposed future work.
+
+***
+
+## Important scientific principle
+
+The final implementation must follow this rule:
+
+> Use chemical similarity to retrieve candidate co-crystal ligands, but select the final PDB using a combination of ligand similarity, binding-mode similarity, target mapping, active-site compatibility, structural quality, and docking/MD suitability.
+
+The purpose of this extension is not simply to replace `7MYI` and `5MCQ` with arbitrary similar structures. The purpose is to create an explainable, target-aware, reproducible structure-selection system that improves docking and MD template selection while preserving the existing validated BACE1 workflows.
