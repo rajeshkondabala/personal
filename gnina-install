@@ -136,5 +136,22 @@ cmake --build "$BUILD" --parallel "$(nproc)" --target gnina
 
 
 
+ulimit -a
+df -h $HOME /tmp $CONDA_PREFIX
+pgrep -a conda | head
+# if another conda is running, wait or kill it
+
+conda activate gnina-build
+conda install -y -c conda-forge "numpy=1.26.*"
+
+
+conda activate gnina-build
+mkdir -p $HOME/opt
+cd $HOME/opt
+# if wget also EAGAIN, retry; this is one zip, not a huge solve
+wget -c https://download.pytorch.org/libtorch/cu121/libtorch-cxx11-abi-shared-with-deps-2.5.1%2Bcu121.zip
+unzip -q -o libtorch-cxx11-abi-shared-with-deps-2.5.1+cu121.zip
+ls $HOME/opt/libtorch/share/cmake/Torch/TorchConfig.cmake
+
 
 
