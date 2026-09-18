@@ -1,0 +1,176 @@
+cat > $HOME/gnina-1.3.3-rdkit-QC/gninasrc/lib/szv_grid.h << 'EOF'
+#ifndef VINA_SZV_GRID_H
+#define VINA_SZV_GRID_H
+
+#include "model.h"
+#include "grid_dim.h"
+#include "array3d.h"
+#include "brick.h"
+
+class szv_grid_cache {
+  public:
+    typedef boost::array<int, 3> ijk;
+
+    szv_grid_cache(const model& m_, fl cut);
+    ~szv_grid_cache();
+    szv_grid_cache(const szv_grid_cache&) = delete;
+    szv_grid_cache& operator=(const szv_grid_cache&) = delete;
+
+    const model& getModel() const {
+      return m;
+    }
+
+    void compute_relevant(const grid_dims& gd, szv& relevant_indices) const {
+      vec start, end;
+      for (sz i = 0; i < 3; i++) {
+        start[i] = gd[i].begin;
+        end[i] = gd[i].end;
+      }
+
+      VINA_FOR_IN(i, m.grid_atoms) {
+        const atom& a = m.grid_atoms[i];
+        if (a.acceptable_type() && !a.is_hydrogen()
+            && brick_distance_sqr(start, end, a.coords) < cutoff_sqr)
+          relevant_indices.push_back(i);
+      }
+    }
+
+    static void get_local_dims(const grid_dims& gd, ijk& offset, ijk& dims) {
+      for (sz i = 0; i < 3; i++) {
+        offset[i] = std::floor(gd[i].begin / granularity);
+        dims[i] = std::ceil(gd[i].end / granularity) - offset[i] + 1;
+      }
+    }
+
+    static ijk local_index(const vec& coord, const ijk& offset) {
+      ijk ret;
+      for (sz i = 0; i < 3; i++) {
+        ret[i] = std::floor(coord[i] / granularity) - offset[i];
+      }
+      return ret;
+    }
+
+    const szv* get(const vec& coord, const szv& relevant_indices) const;
+
+    static grid_dims szv_grid_dims(const grid_dims& gd) {
+      ijk off, range;
+      get_local_dims(gd, off, range);
+      grid_dims tmp;
+      VINA_FOR_IN(i, tmp) {
+        tmp[i].begin = gd[i].begin;
+        tmp[i].end = gd[i].end;
+        tmp[i].n = range[i];
+      }
+      return tmp;
+    }
+
+  private:
+    struct cache_impl;
+    cache_impl* impl;
+    const model& m;
+    fl cutoff_sqr;
+    static constexpr fl granularity = 3.0;
+};
+
+struct szv_grid {
+    szv_grid(szv_grid_cache& c, const grid_dims& gd)
+        : cache(c) {
+      cache.get_local_dims(gd, offset, range);
+      m_data.resize(range[0], range[1], range[2]);
+      cache.compute_relevant(gd, relevant_indexes);
+    }
+
+    const szv& possibilities(const vec& coords) const {
+      boost::array<int, 3> index = cache.local_index(coords, offset);
+      assert(index[0] < m_data.dim0());
+      assert(index[1] < m_data.dim1());
+      assert(index[2] < m_data.dim2());
+      const szv* ret = m_data(index[0], index[1], index[2]);
+      if (ret == NULL) {
+        ret = cache.get(coords, relevant_indexes);
+        m_data(index[0], index[1], index[2]) = ret;
+      }
+      return *ret;
+    }
+  private:
+    szv_grid_cache& cache;
+    szv relevant_indexes;
+    mutable array3d<const szv*> m_data;
+    boost::array<int, 3> offset;
+    boost::array<int, 3> range;
+};
+
+#endif
+EOF
+
+cat > $HOME/gnina-1.3.3-rdkit-QC/gninasrc/lib/szv_grid.cpp << 'EOF'
+#include "szv_grid.h"
+#include "brick.h"
+
+#include <unordered_map>
+#include <boost/functional/hash.hpp>
+
+namespace boost {
+inline bool operator==(const array<int, 3> &a, const array<int, 3> &b) {
+  return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+inline std::size_t hash_value(const array<int, 3> &e) {
+  std::size_t seed = 0;
+  boost::hash_combine(seed, e[0]);
+  boost::hash_combine(seed, e[1]);
+  boost::hash_combine(seed, e[2]);
+  return seed;
+}
+}
+
+struct ijk_hash {
+  std::size_t operator()(const boost::array<int, 3> &e) const {
+    return boost::hash<boost::array<int, 3>>()(e);
+  }
+};
+
+struct szv_grid_cache::cache_impl {
+  std::unordered_map<szv_grid_cache::ijk, szv*, ijk_hash> cache;
+};
+
+szv_grid_cache::szv_grid_cache(const model& m_, fl cut)
+    : impl(new cache_impl()), m(m_), cutoff_sqr(cut) {
+}
+
+szv_grid_cache::~szv_grid_cache() {
+  for (auto itr = impl->cache.begin(), end = impl->cache.end(); itr != end;
+      ++itr) {
+    delete itr->second;
+  }
+  delete impl;
+}
+
+const szv* szv_grid_cache::get(const vec& coord,
+    const szv& relevant_indices) const {
+  ijk index;
+  for (sz i = 0; i < 3; i++) {
+    index[i] = std::floor(coord[i] / granularity);
+  }
+
+  auto& cache = impl->cache;
+  if (cache.count(index) == 0) {
+    szv *atoms = new szv();
+    vec lower, upper;
+    for (sz i = 0; i < 3; i++) {
+      lower[i] = std::floor(coord[i] / granularity) * granularity;
+      upper[i] = std::ceil(coord[i] / granularity) * granularity;
+    }
+    VINA_FOR_IN(ri, relevant_indices) {
+      const sz i = relevant_indices[ri];
+      const atom& a = m.grid_atoms[i];
+      if (!a.is_hydrogen() && a.acceptable_type()) {
+        if (brick_distance_sqr(lower, upper, a.coords) < cutoff_sqr)
+          atoms->push_back(i);
+      }
+    }
+    cache[index] = atoms;
+  }
+  return cache[index];
+}
+EOF
