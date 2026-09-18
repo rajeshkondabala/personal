@@ -82,9 +82,15 @@ cmake --build "$BUILD" --parallel "$(nproc)" --target gnina
 
 conda activate gnina-build
 python -m pip uninstall -y torch torchvision torchaudio
+conda activate gnina-build
 
-conda install -y -c conda-forge "pytorch=*=cuda*"
+# see what GPU builds exist (look at cuda12* in the build string)
+conda search -c conda-forge pytorch | grep -i cuda | tail -20
 
+conda install -y -c conda-forge pytorch-gpu "cuda-version=12.1"
+#If pytorch-gpu is missing, try:
+conda install -y -c conda-forge "pytorch=2.5.*" "cuda-version=12.1"
+python -c "import torch; print(torch.__version__); print('cuda', torch.version.cuda); print('abi', torch._C._GLIBCXX_USE_CXX11_ABI); print('gpu', torch.cuda.is_available())"
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch._C._GLIBCXX_USE_CXX11_ABI)"
 # ABI must print True. CUDA should be 12.x
 
