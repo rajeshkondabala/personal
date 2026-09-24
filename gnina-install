@@ -1,3 +1,5 @@
+conda create -y -n gnina-build
+
 conda activate gnina-build
 
 conda install -y -c conda-forge \
@@ -14,144 +16,27 @@ conda install -y -c conda-forge \
   jsoncpp zlib protobuf libprotobuf \
   patchelf cmake cudnn
 
-python -m pip install --upgrade pip
-python -m pip install torch --index-url https://download.pytorch.org/whl/cu121
+python -m pip install torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-conda activate gnina-build
-hash -r
 
-echo "gcc:  $(command -v gcc)"; gcc --version | head -1
-echo "g++:  $(command -v g++)"; g++ --version | head -1
-echo "cmake: $(command -v cmake)"; cmake --version | head -1
-# gcc/g++/cmake must be .../envs/gnina-build/bin/...  NOT /usr/bin/gcc
-
-grep BOOST_LIB_VERSION "$CONDA_PREFIX/include/boost/version.hpp"
-# 1_84
-
-test -f "$CONDA_PREFIX/include/rdkit/GraphMol/RDKitBase.h" && echo RDKit_headers_OK
-python -c "import torch,rdkit; print('torch', torch.__version__, 'abi', torch._C._GLIBCXX_USE_CXX11_ABI, 'cuda', torch.version.cuda)"
-# torch ...+cu121  abi False  cuda 12.1
-
-conda activate gnina-build
+which gcc g++
+gcc --version
 export CUDA_HOME=/usr/local/cuda-12.2
-export PATH="$CONDA_PREFIX/bin:$CUDA_HOME/bin:$PATH"
-export CC="$CONDA_PREFIX/bin/gcc"
-export CXX="$CONDA_PREFIX/bin/g++"
-export CUDAHOSTCXX="$CXX"
-
-export SRC=$HOME/gnina-1.3.3-rdkit-QC
-export BUILD=$HOME/gnina-1.3.3-build-gnina
-export TORCH_PREFIX="$(python -c 'import torch,os; print(os.path.dirname(torch.__file__))')"
+export PATH="$CUDA_HOME/bin:$PATH"
+export CC=$(which gcc)
+export CXX=$(which g++)
+export CUDAHOSTCXX=$CXX
+export TORCH_PREFIX=$(python -c 'import torch,os; print(os.path.dirname(torch.__file__))')
+export Boost_DIR=$(find "$CONDA_PREFIX/lib/cmake" \
+  -maxdepth 1 \
+  -type d \
+  -name 'Boost-*' | head -1)
+export SRC=/home/rajeshk/gnina-1.3.3-rdkit-QC
+export BUILD=/home/rajeshk/gnina-1.3.3_build
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
 
-cmake -S "$SRC" -B "$BUILD" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_COMPILER="$CC" \
-  -DCMAKE_CXX_COMPILER="$CXX" \
-  -DCMAKE_CUDA_HOST_COMPILER="$CXX" \
-  -DCMAKE_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" \
-  -DCMAKE_CUDA_FLAGS="-Xcompiler -D_GLIBCXX_USE_CXX11_ABI=0" \
-  -DBOOST_ROOT="$CONDA_PREFIX" \
-  -DBoost_NO_SYSTEM_PATHS=ON \
-  -DCMAKE_CUDA_ARCHITECTURES=80 \
-  -DGNINA_DISALLOW_OPENBABEL=ON \
-  -DCMAKE_DISABLE_FIND_PACKAGE_OpenBabel3=TRUE \
-  -DBUILD_PYGNINA=OFF \
-  -DCMAKE_PREFIX_PATH="${CONDA_PREFIX};${TORCH_PREFIX};${CUDA_HOME}" \
-  -DCUDA_TOOLKIT_ROOT_DIR="${CUDA_HOME}" \
-  -DTorch_DIR="${TORCH_PREFIX}/share/cmake/Torch" \
-  -DPython3_EXECUTABLE="${CONDA_PREFIX}/bin/python3" \
-  -DZLIB_ROOT="$CONDA_PREFIX" \
-  -DZLIB_INCLUDE_DIR="$CONDA_PREFIX/include" \
-  -DZLIB_LIBRARY="$CONDA_PREFIX/lib/libz.so" \
-  -DRDKIT_INCLUDE_DIR="$CONDA_PREFIX/include/rdkit" \
-  -DRDKIT_LIBRARY_DIR="$CONDA_PREFIX/lib" \
-  -DCUDNN_INCLUDE_PATH="$CONDA_PREFIX/include" \
-  -DCUDNN_LIBRARY_PATH="$CONDA_PREFIX/lib/libcudnn.so"
+cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.2/bin/nvcc -DCMAKE_CUDA_HOST_COMPILER="$CXX" -DBOOST_ROOT="$CONDA_PREFIX" -DCMAKE_CUDA_ARCHITECTURES=80 -DGNINA_DISALLOW_OPENBABEL=ON -DCMAKE_DISABLE_FIND_PACKAGE_OpenBabel3=TRUE -DBUILD_PYGNINA=OFF -DCMAKE_PREFIX_PATH="${CONDA_PREFIX};${TORCH_PREFIX};${CUDA_HOME}" -DCUDA_TOOLKIT_ROOT_DIR="${CUDA_HOME}" -DTorch_DIR="${TORCH_PREFIX}/share/cmake/Torch" -DPython3_EXECUTABLE="${CONDA_PREFIX}/bin/python3" -DZLIB_ROOT="$CONDA_PREFIX" -DZLIB_INCLUDE_DIR="$CONDA_PREFIX/include" -DZLIB_LIBRARY="$CONDA_PREFIX/lib/libz.so" -DRDKIT_INCLUDE_DIR="$CONDA_PREFIX/include/rdkit" -DRDKIT_LIBRARY_DIR="$CONDA_PREFIX/lib" -DCUDNN_INCLUDE_PATH="$CONDA_PREFIX/include" -DCUDNN_LIBRARY_PATH="$CONDA_PREFIX/lib/libcudnn.so"
 
 cmake --build "$BUILD" --parallel "$(nproc)" --target gnina
-
-
-
-
-
-
-
-
-conda activate gnina-build
-python -m pip uninstall -y torch torchvision torchaudio
-conda activate gnina-build
-
-# see what GPU builds exist (look at cuda12* in the build string)
-conda search -c conda-forge pytorch | grep -i cuda | tail -20
-
-conda install -y -c conda-forge pytorch-gpu "cuda-version=12.1"
-#If pytorch-gpu is missing, try:
-conda install -y -c conda-forge "pytorch=2.5.*" "cuda-version=12.1"
-python -c "import torch; print(torch.__version__); print('cuda', torch.version.cuda); print('abi', torch._C._GLIBCXX_USE_CXX11_ABI); print('gpu', torch.cuda.is_available())"
-python -c "import torch; print(torch.__version__, torch.version.cuda, torch._C._GLIBCXX_USE_CXX11_ABI)"
-# ABI must print True. CUDA should be 12.x
-
-
-
-conda activate gnina-build
-export CUDA_HOME=/usr/local/cuda-12.2
-export PATH="$CONDA_PREFIX/bin:$CUDA_HOME/bin:$PATH"
-export CC="$CONDA_PREFIX/bin/gcc"
-export CXX="$CONDA_PREFIX/bin/g++"
-export CUDAHOSTCXX="$CXX"
-export SRC=$HOME/gnina-1.3.3-rdkit-QC
-export BUILD=$HOME/gnina-1.3.3-build-gnina
-export TORCH_PREFIX="$(python -c 'import torch,os; print(os.path.dirname(torch.__file__))')"
-
-rm -rf "$BUILD"
-mkdir -p "$BUILD"
-
-cmake -S "$SRC" -B "$BUILD" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_COMPILER="$CC" \
-  -DCMAKE_CXX_COMPILER="$CXX" \
-  -DCMAKE_CUDA_HOST_COMPILER="$CXX" \
-  -DBOOST_ROOT="$CONDA_PREFIX" \
-  -DBoost_NO_SYSTEM_PATHS=ON \
-  -DCMAKE_CUDA_ARCHITECTURES=80 \
-  -DGNINA_DISALLOW_OPENBABEL=ON \
-  -DCMAKE_DISABLE_FIND_PACKAGE_OpenBabel3=TRUE \
-  -DBUILD_PYGNINA=OFF \
-  -DCMAKE_PREFIX_PATH="${CONDA_PREFIX};${TORCH_PREFIX};${CUDA_HOME}" \
-  -DCUDA_TOOLKIT_ROOT_DIR="${CUDA_HOME}" \
-  -DTorch_DIR="${TORCH_PREFIX}/share/cmake/Torch" \
-  -DPython3_EXECUTABLE="${CONDA_PREFIX}/bin/python3" \
-  -DZLIB_ROOT="$CONDA_PREFIX" \
-  -DZLIB_INCLUDE_DIR="$CONDA_PREFIX/include" \
-  -DZLIB_LIBRARY="$CONDA_PREFIX/lib/libz.so" \
-  -DRDKIT_INCLUDE_DIR="$CONDA_PREFIX/include/rdkit" \
-  -DRDKIT_LIBRARY_DIR="$CONDA_PREFIX/lib" \
-  -DCUDNN_INCLUDE_PATH="$CONDA_PREFIX/include" \
-  -DCUDNN_LIBRARY_PATH="$CONDA_PREFIX/lib/libcudnn.so"
-
-cmake --build "$BUILD" --parallel "$(nproc)" --target gnina
-
-
-
-ulimit -a
-df -h $HOME /tmp $CONDA_PREFIX
-pgrep -a conda | head
-# if another conda is running, wait or kill it
-
-conda activate gnina-build
-conda install -y -c conda-forge "numpy=1.26.*"
-
-
-conda activate gnina-build
-mkdir -p $HOME/opt
-cd $HOME/opt
-# if wget also EAGAIN, retry; this is one zip, not a huge solve
-wget -c https://download.pytorch.org/libtorch/cu121/libtorch-cxx11-abi-shared-with-deps-2.5.1%2Bcu121.zip
-unzip -q -o libtorch-cxx11-abi-shared-with-deps-2.5.1+cu121.zip
-ls $HOME/opt/libtorch/share/cmake/Torch/TorchConfig.cmake
-
-
-
